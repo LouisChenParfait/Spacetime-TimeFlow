@@ -1,0 +1,699 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>SPACETIME — 时间膨胀梯度可视化 (完整网格版)</title>
+<style>
+*{box-sizing:border-box}
+html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#02030a}
+body{font-family:Arial,"Microsoft YaHei",sans-serif}
+canvas{display:block}
+#ui{position:fixed;inset:0;pointer-events:none;color:#dfeaff;text-shadow:0 1px 10px #000}
+#title{position:absolute;left:24px;top:20px}
+#title h1{font-size:18px;font-weight:400;letter-spacing:.18em;margin:0 0 7px}
+#title p{font-size:11px;color:#7887a2;margin:3px 0;letter-spacing:.04em}
+#panel{position:absolute;right:20px;top:20px;min-width:290px;padding:14px 16px;
+background:rgba(3,7,17,.72);border:1px solid rgba(90,150,255,.25);
+border-radius:10px;backdrop-filter:blur(10px);
+font:12px/1.85 ui-monospace,SFMono-Regular,Consolas,monospace}
+.row{display:flex;justify-content:space-between;gap:25px}
+.v{color:#67d8ff}.g{color:#54e8a7}.o{color:#ffad65}
+#legend{position:absolute;left:24px;bottom:24px;padding:12px 16px;
+border-left:2px solid rgba(80,150,255,.5);background:rgba(0,0,0,.32);
+font-size:11px;line-height:1.9;color:#8896ad}
+#legend b{color:#dfeaff;font-weight:400}
+#hint{position:absolute;right:20px;bottom:20px;text-align:right;color:#657189;font-size:11px;line-height:1.7}
+#bootError{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);
+z-index:20;display:none;max-width:680px;padding:18px 22px;border:1px solid rgba(255,150,100,.45);
+border-radius:12px;background:rgba(12,8,10,.95);color:#ffd0b0;font:13px/1.8 Arial,'Microsoft YaHei',sans-serif;
+text-align:center}
+</style>
+</head>
+<body>
+<div id="bootError"></div>
+<div id="ui">
+  <div id="title">
+    <h1>SPACETIME / 时空引力网</h1>
+    <p>3D CARTESIAN GRID × LOCAL SCHWARZSCHILD CURVATURE</p>
+    <p>三重时间编码：节点闪烁 / 脉冲阵列 / 累积色 —— 越接近引力源，时间越慢</p>
+  </div>
+  <div id="panel">
+    <div class="row"><span>Schwarzschild 半径 rₛ</span><span id="rs" class="v">18.00</span></div>
+    <div class="row"><span>最近网格半径 r</span><span id="r">0.00</span></div>
+    <div class="row"><span>局部时间 dτ/dt</span><span id="tau" class="g">1.000</span></div>
+    <div class="row"><span>空间映射因子 (ρ→r)</span><span id="space" class="v">1.000</span></div>
+    <div class="row"><span>中心累积时间比</span><span id="accCenter" class="g">1.000</span></div>
+    <div class="row"><span>边缘累积时间比</span><span id="accEdge" class="g">1.000</span></div>
+    <div class="row"><span>光子频率 f/f₀</span><span id="redshift" class="o">1.000×</span></div>
+    <div class="row"><span>引力红移 z</span><span id="zshift" class="o">0.000</span></div>
+    <div class="row"><span>宇宙尺度因子 a(t)</span><span id="a" class="v">1.000</span></div>
+    <div class="row"><span>宇宙时间</span><span id="time">0.00</span></div>
+  </div>
+  <div id="legend">
+    <div><b>节点闪烁</b>：每个网格点按本地时间脉动，中心缓慢，边缘快速</div>
+    <div><b>脉冲阵列</b>：同一线上的脉冲在强场区被挤压，弱场区均匀舒展</div>
+    <div><b>累积色</b>：节点颜色随累积本地时间演化，中心长期保持绿色，边缘迅速转为蓝色</div>
+    <div style="margin-top:6px"><span style="color:#54e8a7">绿 = 时间慢</span>　<span style="color:#438cff">蓝 = 时间快</span>　<span style="color:#ffad65">橙→红 = 引力红移</span></div>
+  </div>
+  <div id="hint">拖拽：旋转　滚轮：缩放<br>Shift + 滚轮：调整宇宙膨胀速度</div>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+window.addEventListener('error', (e) => {
+    const box = document.getElementById('bootError');
+    box.style.display = 'block';
+    box.innerHTML = "<b>运行时错误：</b><br><span style='color:#fff'>" + (e.message || e.error) + "</span>";
+});
+
+try { main(); } catch (err) {
+    const box = document.getElementById('bootError');
+    box.style.display = 'block';
+    box.innerHTML = "<b>初始化失败：</b><br><span style='color:#fff'>" + err.message + "</span><br><pre style='text-align:left;font-size:11px;color:#aaa'>" + err.stack + "</pre>";
+    throw err;
+}
+
+function main() {
+
+/* =========================================================
+   物理参数
+   ========================================================= */
+const RS = 18.0;
+const GRID_N = 9;
+const HALF = 180;
+const STAR_COUNT = 1800;
+
+let cosmicTime = 0;
+let scaleFactor = 1.0;
+let expansionSpeed = 1.0;
+
+function isotropicTimeFactor(rho){
+    const q = RS / (4 * Math.max(rho, RS/4 + 0.01));
+    return Math.abs((1 - q) / (1 + q));
+}
+
+function isotropicSpaceFactor(rho){
+    const q = RS / (4 * Math.max(rho, RS/4 + 0.01));
+    return Math.pow(1 + q, 2);
+}
+
+function schwarzschildTimeFactor(r){
+    return Math.sqrt(Math.max(0.0001, 1 - RS / Math.max(r, RS * 1.0005)));
+}
+
+function hubble(a){
+    const Om = 0.30, Or = 0.0001, Ol = 0.6999, H0 = 0.018;
+    return H0 * Math.sqrt(Or / Math.pow(a,4) + Om / Math.pow(a,3) + Ol);
+}
+
+/* =========================================================
+   场景
+   ========================================================= */
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x02030a);
+scene.fog = new THREE.FogExp2(0x02030a, 0.00075);
+
+const camera = new THREE.PerspectiveCamera(52, window.innerWidth / window.innerHeight, 0.1, 4000);
+camera.position.set(260, 185, 310);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.045;
+controls.autoRotate = true;
+controls.autoRotateSpeed = 0.12;
+controls.minDistance = 60;
+controls.maxDistance = 900;
+
+/* ---------- 中心质量 ---------- */
+const core = new THREE.Group();
+scene.add(core);
+
+const coreSphere = new THREE.Mesh(
+    new THREE.SphereGeometry(7, 40, 40),
+    new THREE.MeshBasicMaterial({ color: 0xffffff })
+);
+core.add(coreSphere);
+
+const coreGlow = new THREE.Mesh(
+    new THREE.SphereGeometry(13, 40, 40),
+    new THREE.MeshBasicMaterial({
+        color: 0x9edcff, transparent: true, opacity: 0.18,
+        side: THREE.BackSide, blending: THREE.AdditiveBlending
+    })
+);
+core.add(coreGlow);
+
+const horizon = new THREE.Mesh(
+    new THREE.SphereGeometry(RS, 48, 48),
+    new THREE.MeshBasicMaterial({ color: 0x000000 })
+);
+core.add(horizon);
+
+const photonRing = new THREE.Mesh(
+    new THREE.TorusGeometry(1.5 * RS, 0.42, 16, 180),
+    new THREE.MeshBasicMaterial({
+        color: 0xffa35f, transparent: true, opacity: 0.55,
+        blending: THREE.AdditiveBlending
+    })
+);
+photonRing.rotation.x = Math.PI / 2;
+scene.add(photonRing);
+
+/* =========================================================
+   三维笛卡尔时空网格 (完整 9×9×9 全部节点)
+   ========================================================= */
+const grid = new THREE.Group();
+scene.add(grid);
+
+const nodes = [];
+const lines = [];
+
+function latticeValue(i){
+    return -HALF + (2 * HALF) * (i / (GRID_N - 1));
+}
+
+// 完整节点集合
+for (let x = 0; x < GRID_N; x++){
+    for (let y = 0; y < GRID_N; y++){
+        for (let z = 0; z < GRID_N; z++){
+            nodes.push({
+                base: new THREE.Vector3(latticeValue(x), latticeValue(y), latticeValue(z)),
+                mesh: null,
+                localTime: 0,
+                accumulatedTime: 0,
+                tau: 1.0,
+                gridIndex: {x, y, z}
+            });
+        }
+    }
+}
+
+// 建立索引查找表
+const nodeIndex = new Map();
+nodes.forEach((n, i) => {
+    nodeIndex.set(`${n.gridIndex.x},${n.gridIndex.y},${n.gridIndex.z}`, i);
+});
+
+// 网格线：沿 x, y, z 三轴连接相邻节点
+function addLineChain(startIdx, axis){
+    const pts = [];
+    const arr = [];
+    let idx = startIdx;
+    for (let i = 0; i < GRID_N; i++){
+        const n = nodes[idx];
+        pts.push(n.base.clone());
+        arr.push(idx);
+        if (i < GRID_N - 1) {
+            if (axis === "x") idx = nodeIndex.get(`${n.gridIndex.x+1},${n.gridIndex.y},${n.gridIndex.z}`);
+            if (axis === "y") idx = nodeIndex.get(`${n.gridIndex.x},${n.gridIndex.y+1},${n.gridIndex.z}`);
+            if (axis === "z") idx = nodeIndex.get(`${n.gridIndex.x},${n.gridIndex.y},${n.gridIndex.z+1}`);
+        }
+    }
+
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(GRID_N * 3), 3));
+
+    const mat = new THREE.LineBasicMaterial({
+        color: 0x2f72ff,
+        transparent: true,
+        opacity: 0.22,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false
+    });
+
+    const line = new THREE.Line(geo, mat);
+    grid.add(line);
+    lines.push({ axis, arr, base: pts, geo, mat });
+}
+
+// 沿三条轴生成所有线
+// 为了控制密度，只保留至少一条坐标在边缘上的线（即立方体骨架附近的线）
+// 但为了保留中心附近的弯曲可视化，我们保留所有线，只是降低透明度
+for (let y = 0; y < GRID_N; y++){
+    for (let z = 0; z < GRID_N; z++){
+        const startIdx = nodeIndex.get(`0,${y},${z}`);
+        addLineChain(startIdx, "x");
+    }
+}
+for (let x = 0; x < GRID_N; x++){
+    for (let z = 0; z < GRID_N; z++){
+        const startIdx = nodeIndex.get(`${x},0,${z}`);
+        addLineChain(startIdx, "y");
+    }
+}
+for (let x = 0; x < GRID_N; x++){
+    for (let y = 0; y < GRID_N; y++){
+        const startIdx = nodeIndex.get(`${x},${y},0`);
+        addLineChain(startIdx, "z");
+    }
+}
+
+/* ---------- 节点球体 (共享几何体，性能友好) ---------- */
+const nodeGeo = new THREE.SphereGeometry(1.6, 8, 8);
+nodes.forEach(n => {
+    const m = new THREE.Mesh(
+        nodeGeo,
+        new THREE.MeshBasicMaterial({
+            color: 0x7caaff, transparent: true, opacity: 0.85,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false
+        })
+    );
+    n.mesh = m;
+    grid.add(m);
+});
+
+/* ---------- 度规映射 ----------
+   网格坐标用 isotropic 坐标 ρ 定义。
+   isotropicSpaceFactor(ρ) = (1 + rₛ/4ρ)² 恰好是 isotropic 径向坐标 →
+   Schwarzschild 面积半径 r = ρ(1 + rₛ/4ρ)² 的坐标变换（不是把度规分量 B⁴ 当缩放因子）。
+   再乘 0.58 是视觉阻尼，仅压缩近场拉伸的观感，不具物理量意义。 */
+function mapPoint(p){
+    const rho = Math.max(p.length(), RS / 4 + 0.8);
+    let sf = isotropicSpaceFactor(rho);
+    sf = 1 + (sf - 1) * 0.58;             // 视觉阻尼：压缩近场拉伸，纯观感
+
+    const farWeight = THREE.MathUtils.smoothstep(rho, 70, HALF * 1.1);
+    const cosmic = 1 + (scaleFactor - 1) * farWeight;
+
+    return p.clone().multiplyScalar(sf * cosmic);
+}
+
+/* ---------- 更新网格位置 ---------- */
+function updateGrid(){
+    let nearest = Infinity;
+
+    lines.forEach(item => {
+        const arr = item.geo.attributes.position.array;
+        item.base.forEach((p, i) => {
+            const mapped = mapPoint(p);
+            arr[i * 3] = mapped.x;
+            arr[i * 3 + 1] = mapped.y;
+            arr[i * 3 + 2] = mapped.z;
+        });
+        item.geo.attributes.position.needsUpdate = true;
+
+        // 根据线所在的半径，调整颜色强度
+        const avgR = item.base.reduce((s, p) => s + p.length(), 0) / item.base.length;
+        const strength = Math.exp(-Math.max(0, avgR - RS) / 100);
+        item.mat.color.setRGB(
+            0.15 + 0.15 * strength,
+            0.40 + 0.45 * strength,
+            0.95 - 0.15 * strength
+        );
+        item.mat.opacity = 0.10 + 0.28 * strength;
+    });
+
+    nodes.forEach(n => {
+        const r = n.base.length();
+        const p = mapPoint(n.base);
+        n.mesh.position.copy(p);
+
+        nearest = Math.min(nearest, r);
+    });
+
+    return nearest;
+}
+
+/* =========================================================
+   方案一 + 方案六：节点闪烁 + 累积时间色
+   ========================================================= */
+function updateNodePulseAndColor(dt){
+    nodes.forEach(n => {
+        const r = Math.max(n.base.length(), RS / 4 + 0.8);
+
+        // 本地时间因子：节点坐标本就是 isotropic 半径 ρ，直接用 A(ρ)，无需在 2.4rₛ 处切换公式
+        const tau = isotropicTimeFactor(r);
+        n.tau = tau;
+
+        // 累积本地时间
+        n.localTime += dt * tau * 3.0;
+        n.accumulatedTime += dt * tau;
+
+        // ---- 方案一：脉动 ----
+        const pulse = 0.5 + 0.5 * Math.sin(n.localTime);
+
+        // 节点大小脉动
+        const s = 0.85 + 0.75 * pulse;
+        n.mesh.scale.setScalar(s);
+
+        // ---- 方案六：累积时间色 ----
+        const ratio = Math.min(1, n.accumulatedTime / Math.max(cosmicTime, 0.001));
+        // 色相：中心=绿(0.35)，边缘=蓝(0.58)
+        const hue = 0.35 + 0.23 * ratio;
+        const color = new THREE.Color().setHSL(hue, 0.95, 0.58);
+
+        // 亮度脉动 (但不压低色相识别度)
+        const brightness = 0.7 + 0.5 * pulse;
+        n.mesh.material.color.copy(color).multiplyScalar(brightness);
+        n.mesh.material.opacity = 0.55 + 0.45 * pulse;
+    });
+}
+
+/* =========================================================
+   方案三：脉冲阵列
+   ========================================================= */
+const clockPulseGroup = new THREE.Group();
+scene.add(clockPulseGroup);
+
+const clockPulses = [];
+const PULSES_PER_LINE = 5;
+
+const pulseGeo = new THREE.SphereGeometry(1.6, 8, 8);
+
+function makePulseColor(tau){
+    const c = new THREE.Color();
+    c.setHSL(
+        THREE.MathUtils.lerp(0.42, 0.52, tau),
+        0.95,
+        THREE.MathUtils.lerp(0.50, 0.68, tau)
+    );
+    return c;
+}
+
+// 只在部分线上放置脉冲，避免过密 (每隔 3 条线放一组)
+const pulseLineIndices = [];
+lines.forEach((line, i) => {
+    if (i % 3 === 0) pulseLineIndices.push(i);
+});
+
+pulseLineIndices.forEach(lineIdx => {
+    const line = lines[lineIdx];
+    for (let i = 0; i < PULSES_PER_LINE; i++){
+        const mat = new THREE.MeshBasicMaterial({
+            color: 0x63ffc4, transparent: true, opacity: 0.95,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false
+        });
+        const mesh = new THREE.Mesh(pulseGeo, mat);
+        clockPulseGroup.add(mesh);
+
+        clockPulses.push({
+            line,
+            mesh,
+            u: i / PULSES_PER_LINE,
+            baseSpeed: 0.14
+        });
+    }
+});
+
+const _pulseA = new THREE.Vector3();
+const _pulseB = new THREE.Vector3();
+
+function mappedLinePoint(line, u){
+    const n = line.base.length;
+    const x = THREE.MathUtils.clamp(u, 0, 0.999999) * (n - 1);
+    const i = Math.floor(x);
+    const f = x - i;
+    _pulseA.copy(mapPoint(line.base[i]));
+    _pulseB.copy(mapPoint(line.base[Math.min(i + 1, n - 1)]));
+    return _pulseA.lerp(_pulseB, f).clone();
+}
+
+function localRadiusOnLine(line, u){
+    const n = line.base.length;
+    const x = THREE.MathUtils.clamp(u, 0, 0.999999) * (n - 1);
+    const i = Math.floor(x);
+    const f = x - i;
+    const a = line.base[i];
+    const b = line.base[Math.min(i + 1, n - 1)];
+    return THREE.MathUtils.lerp(a.length(), b.length(), f);
+}
+
+function updateClockPulses(dt){
+    clockPulses.forEach(p => {
+        const r = Math.max(localRadiusOnLine(p.line, p.u), RS / 4 + 0.8);
+        const tau = isotropicTimeFactor(r);
+
+        p.u += p.baseSpeed * tau * dt;
+        if (p.u >= 1) p.u -= 1;
+        if (p.u < 0)  p.u += 1;
+
+        const pos = mappedLinePoint(p.line, p.u);
+        p.mesh.position.copy(pos);
+
+        const c = makePulseColor(tau);
+        p.mesh.material.color.copy(c);
+        p.mesh.material.opacity = 0.55 + 0.45 * tau;
+
+        const s = 1.0 + (0.6 * (1 - tau));
+        p.mesh.scale.setScalar(s);
+    });
+}
+
+/* =========================================================
+   光子流
+   ========================================================= */
+const photonGroup = new THREE.Group();
+scene.add(photonGroup);
+
+const photonRays = [];
+const photonParticles = [];
+const PHOTON_RAYS = 12;
+const PHOTON_STEPS = 120;
+const photonHeadGeo = new THREE.SphereGeometry(2.7, 8, 8);
+const photonTailGeo = new THREE.SphereGeometry(1.45, 8, 8);
+
+function gravitationalA(r){
+    return schwarzschildTimeFactor(Math.max(r, RS * 1.0005));
+}
+
+function makePhotonPath(index){
+    const angle = index / PHOTON_RAYS * Math.PI * 2;
+    const tilt = (index % 6 - 2.5) * 0.055;
+
+    let p = new THREE.Vector3(
+        Math.cos(angle) * 36,
+        Math.sin(angle) * 18 + tilt * 36,
+        Math.sin(angle) * 36
+    );
+
+    const radial = p.clone().normalize();
+    const tangent = new THREE.Vector3(
+        -Math.sin(angle), 0.12 * Math.cos(angle), Math.cos(angle)
+    ).normalize();
+
+    let v = radial.multiplyScalar(0.82).add(tangent.multiplyScalar(0.58)).normalize();
+
+    const points = [];
+    for (let i = 0; i < PHOTON_STEPS; i++){
+        const r = p.length();
+        if (r > 360) break;
+
+        // 弱场启发式偏折：方向每步向中心偏转 ∝ rₛ/r²（牛顿式近似，非严格零测地线积分）。
+        // 目的：让 r≈2rₛ 处的光子“看似向外逃逸并变红”；真实零测地线从此半径发出必被俘获。
+        const radialNow = p.clone().normalize();
+        const bend = Math.min(0.028, RS / (2 * Math.max(r, RS * 1.03) ** 2));
+        v.add(radialNow.clone().multiplyScalar(-bend)).normalize();
+
+        p.add(v.clone().multiplyScalar(2.9));
+        points.push(p.clone());
+    }
+
+    if (points.length < 2) return;
+
+    const geo = new THREE.BufferGeometry().setFromPoints(points);
+    const mat = new THREE.LineBasicMaterial({
+        color: 0xffa35f, transparent: true,
+        opacity: 0.10 + Math.random() * 0.12,
+        blending: THREE.AdditiveBlending
+    });
+    const line = new THREE.Line(geo, mat);
+    photonGroup.add(line);
+
+    for (let k = 0; k < 3; k++){
+        const pm = new THREE.MeshBasicMaterial({
+            color: 0xffc078, transparent: true,
+            opacity: k === 0 ? 0.95 : 0.38 / (k + 1),
+            blending: THREE.AdditiveBlending
+        });
+        const pmesh = new THREE.Mesh(k === 0 ? photonHeadGeo : photonTailGeo, pm);
+        photonGroup.add(pmesh);
+
+        photonParticles.push({
+            mesh: pmesh, path: points,
+            u: (k * -0.018 + 0.08 * index) % 1,
+            speed: 0.16 + Math.random() * 0.06,
+            offset: k * 0.018
+        });
+    }
+
+    photonRays.push({ line, points, phase: Math.random() * 10 });
+}
+
+for (let i = 0; i < PHOTON_RAYS; i++) makePhotonPath(i);
+
+function photonPosition(path, u){
+    if (path.length < 2) return path[0] || new THREE.Vector3();
+    const x = THREE.MathUtils.clamp(u, 0, 0.999999) * (path.length - 1);
+    const i = Math.floor(x);
+    const f = x - i;
+    return path[i].clone().lerp(path[Math.min(i + 1, path.length - 1)], f);
+}
+
+function photonRadius(path, u){
+    const p = photonPosition(path, u);
+    return Math.max(p.length(), RS * 1.0005);
+}
+
+function redshiftColor(freqRatio){
+    const t = THREE.MathUtils.clamp((freqRatio - 0.25) / 0.75, 0, 1);
+    const c = new THREE.Color();
+    c.setHSL(THREE.MathUtils.lerp(0.01, 0.10, t), 0.95, 0.60);
+    return c;
+}
+
+function updatePhotons(dt){
+    photonParticles.forEach(ph => {
+        ph.u += ph.speed * dt;
+        if (ph.u > 1) ph.u -= 1;
+
+        const r = photonRadius(ph.path, ph.u);
+        const emitA = gravitationalA(36);
+        const localA = gravitationalA(r);
+        const freqRatio = THREE.MathUtils.clamp(emitA / Math.max(localA, 0.01), 0.03, 1.2);
+
+        const pos = photonPosition(ph.path, ph.u);
+        ph.mesh.position.copy(pos);
+
+        const c = redshiftColor(freqRatio);
+        ph.mesh.material.color.copy(c);
+
+        const size = 1.0 + 1.7 * (1 - freqRatio);
+        ph.mesh.scale.setScalar(size);
+        ph.mesh.material.opacity = (ph.offset === 0) ? (0.72 + 0.25 * freqRatio) : (0.20 + 0.22 * freqRatio);
+    });
+
+    photonRays.forEach(ray => {
+        ray.line.material.opacity = 0.07 + 0.10 * (0.5 + 0.5 * Math.sin(cosmicTime * 1.7 + ray.phase));
+    });
+
+    photonRing.rotation.z += dt * 0.18;
+    photonRing.material.opacity = 0.28 + 0.25 * (0.5 + 0.5 * Math.sin(cosmicTime * 2.2));
+}
+
+/* =========================================================
+   背景星场
+   ========================================================= */
+const sp = new Float32Array(STAR_COUNT * 3);
+for (let i = 0; i < STAR_COUNT; i++){
+    const r = 520 + Math.random() * 1500;
+    const u = Math.random() * 2 - 1;
+    const a = Math.random() * Math.PI * 2;
+    const s = Math.sqrt(1 - u * u);
+    sp[i * 3] = r * s * Math.cos(a);
+    sp[i * 3 + 1] = r * u;
+    sp[i * 3 + 2] = r * s * Math.sin(a);
+}
+const sg = new THREE.BufferGeometry();
+sg.setAttribute("position", new THREE.BufferAttribute(sp, 3));
+scene.add(new THREE.Points(sg, new THREE.PointsMaterial({
+    color: 0x7197d8, size: 1.25, transparent: true, opacity: 0.62,
+    depthWrite: false, blending: THREE.AdditiveBlending
+})));
+
+/* =========================================================
+   UI
+   ========================================================= */
+function updateUI(nearest){
+    const rho = Math.max(nearest, RS / 4 + 0.8);
+    const tau = isotropicTimeFactor(rho);
+
+    const emitR = 36;
+    const emitA = schwarzschildTimeFactor(emitR);
+    const obsA = schwarzschildTimeFactor(Math.max(nearest, RS * 1.001));
+    const freqRatio = THREE.MathUtils.clamp(emitA / Math.max(obsA, 0.01), 0.03, 1.2);
+    const z = Math.max(0, 1 / freqRatio - 1);
+
+    let accCenter = 1, accEdge = 0;
+    let minR = Infinity, maxR = 0;
+    nodes.forEach(n => {
+        const r = n.base.length();
+        const ratio = n.accumulatedTime / Math.max(cosmicTime, 0.001);
+        if (r < minR) { minR = r; accCenter = ratio; }
+        if (r > maxR) { maxR = r; accEdge = ratio; }
+    });
+
+    document.getElementById("rs").textContent = RS.toFixed(2);
+    document.getElementById("r").textContent = nearest.toFixed(2);
+    document.getElementById("tau").textContent = tau.toFixed(3);
+    document.getElementById("space").textContent = isotropicSpaceFactor(rho).toFixed(3);
+    document.getElementById("accCenter").textContent = accCenter.toFixed(3);
+    document.getElementById("accEdge").textContent = accEdge.toFixed(3);
+    document.getElementById("redshift").textContent = freqRatio.toFixed(3) + "×";
+    document.getElementById("zshift").textContent = z.toFixed(3);
+    document.getElementById("a").textContent = scaleFactor.toFixed(3);
+    document.getElementById("time").textContent = cosmicTime.toFixed(2);
+}
+
+/* =========================================================
+   交互
+   ========================================================= */
+window.addEventListener("wheel", e => {
+    if (e.shiftKey){
+        expansionSpeed -= e.deltaY * 0.001;
+        expansionSpeed = THREE.MathUtils.clamp(expansionSpeed, 0.05, 4);
+        e.preventDefault();
+    }
+}, { passive: false });
+
+window.addEventListener("resize", () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+/* =========================================================
+   动画循环
+   ========================================================= */
+const clock = new THREE.Clock();
+
+function animate(){
+    requestAnimationFrame(animate);
+
+    const dt = Math.min(clock.getDelta(), 0.033);
+    cosmicTime += dt;
+
+    const H = hubble(scaleFactor);
+    scaleFactor += scaleFactor * H * dt * expansionSpeed;
+    scaleFactor = THREE.MathUtils.clamp(scaleFactor, 0.82, 2.2);
+
+    const nearest = updateGrid();
+
+    updateNodePulseAndColor(dt);
+    updateClockPulses(dt);
+    updatePhotons(dt);
+
+    updateUI(nearest);
+
+    coreGlow.scale.setScalar(1 + 0.08 * Math.sin(cosmicTime * 1.7));
+
+    controls.update();
+    renderer.render(scene, camera);
+}
+
+updateGrid();
+animate();
+
+} // end main()
+</script>
+</body>
+</html>
